@@ -1,5 +1,6 @@
 import os
 
+import pytest
 import pytest_asyncio
 from blacksheep.contents import JSONContent
 from blacksheep.testing import TestClient
@@ -40,6 +41,13 @@ async def client(tmp_path):
         yield c
     finally:
         await app.stop()
+
+
+@pytest.fixture()
+def db_path(tmp_path):
+    db = tmp_path / "svc.db"
+    init_db(str(db))
+    return str(db)
 
 
 @pytest_asyncio.fixture()

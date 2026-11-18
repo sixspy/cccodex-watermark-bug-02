@@ -7,14 +7,22 @@ from itsdangerous import BadSignature, URLSafeSerializer
 from app.config import Config
 from app.db import init_db
 from app.services import (
+    fill_makeup_task,
     get_batch,
+    get_batch_sheet,
+    get_residue,
     list_batches,
+    list_events,
+    list_makeup_tasks,
     list_reports,
+    list_residues,
     list_templates,
+    resume_residue,
     run_gap_report,
     stamp_batch,
     trace_downstream,
 )
+from app.services.consistency import consistency_issues
 from app.services.errors import ServiceError
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -162,16 +170,126 @@ async def api_batch_detail(request: Request):
     return json_response({"batch": batch})
 
 
+@app.router.get("/api/batches/{batch_id}/sheet")
+async def api_batch_sheet(request: Request):
+    """盖印附页：批次 + 逐行 + 残段 + 补盖任务同源于一处。"""
+
+    try:
+        require_user(request)
+    except ServiceError as exc:
+        return json_response({"error": exc.message}, exc.status_code)
+    batch_id = int(request.route_values["batch_id"])
+    sheet = get_batch_sheet(batch_id)
+    if not sheet:
+        return json_response({"error": "批次不存在"}, 404)
+    return json_response({"sheet": sheet})
+
+
 @app.router.post("/api/batches/{batch_id}/stamp")
 async def api_stamp(request: Request):
     try:
         require_user(request)
         batch_id = int(request.route_values["batch_id"])
         body = await request.json()
-        batch = stamp_batch(batch_id, str(body.get("watermark_value", "")))
+        batch = stamp_batch(
+            batch_id,
+            str(body.get("watermark_value", "")),
+            boundary=body.get("boundary"),
+            fail_after=body.get("fail_after"),
+        )
     except ServiceError as exc:
-        return json_response({"ok": False, "error": exc.message}, exc.status_code)
+        return json_response(
+            {"ok": False, "error": exc.message, **exc.payload}, exc.status_code
+        )
     return json_response({"ok": True, "batch": batch})
+
+
+@app.router.get("/api/residues")
+async def api_residue_list(request: Request):
+    try:
+        require_user(request)
+    except ServiceError as exc:
+        return json_response({"error": exc.message}, exc.status_code)
+    return json_response({"items": list_residues()})
+
+
+@app.router.get("/api/residues/{residue_id}")
+async def api_residue_detail(request: Request):
+    try:
+        require_user(request)
+    except ServiceError as exc:
+        return json_response({"error": exc.message}, exc.status_code)
+    residue_id = int(request.route_values["residue_id"])
+    residue = get_residue(residue_id)
+    if not residue:
+        return json_response({"error": "残段不存在"}, 404)
+    return json_response({"residue": residue})
+
+
+@app.router.post("/api/residues/{residue_id}/resume")
+async def api_residue_resume(request: Request):
+    try:
+        require_user(request)
+        residue_id = int(request.route_values["residue_id"])
+        result = resume_residue(residue_id)
+    except ServiceError as exc:
+        return json_response(
+            {"ok": False, "error": exc.message, **exc.payload}, exc.status_code
+        )
+    return json_response({"ok": True, **result})
+
+
+@app.router.get("/api/makeup-tasks")
+async def api_makeup_list(request: Request):
+    try:
+        require_user(request)
+    except ServiceError as exc:
+        return json_response({"error": exc.message}, exc.status_code)
+    return json_response({"items": list_makeup_tasks()})
+
+
+@app.router.post("/api/makeup-tasks/{task_id}/fill")
+async def api_makeup_fill(request: Request):
+    try:
+        require_user(request)
+        task_id = int(request.route_values["task_id"])
+        body = await request.json()
+        result = fill_makeup_task(task_id, body.get("watermark_value"))
+    except ServiceError as exc:
+        return json_response(
+            {"ok": False, "error": exc.message, **exc.payload}, exc.status_code
+        )
+    return json_response({"ok": True, **result})
+
+
+@app.router.get("/api/events")
+async def api_events(request: Request):
+    try:
+        require_user(request)
+    except ServiceError as exc:
+        return json_response({"error": exc.message}, exc.status_code)
+    raw = request.query.get("batch_id")
+    batch_id = int(raw[0]) if raw else None
+    return json_response({"items": list_events(batch_id)})
+
+
+@app.router.get("/api/consistency")
+async def api_consistency(request: Request):
+    """全局同源检查：逐批返回漂移明细，供页面收口芯片与编排任务落档。"""
+
+    from app.db import get_db
+
+    try:
+        require_user(request)
+    except ServiceError as exc:
+        return json_response({"error": exc.message}, exc.status_code)
+    issues: dict[str, list[str]] = {}
+    with get_db() as conn:
+        for row in conn.execute("SELECT id, run_code FROM run_batches ORDER BY id").fetchall():
+            found = consistency_issues(conn, row["id"])
+            if found:
+                issues[row["run_code"]] = found
+    return json_response({"ok": not issues, "issues": issues})
 
 
 @app.router.post("/api/trace")
@@ -198,8 +316,10 @@ async def api_gap_list(request: Request):
 async def api_gap_run(request: Request):
     try:
         require_user(request)
+        body = await request.json()
+        report = run_gap_report(str(body.get("as_of_date", "2026-11-16")))
     except ServiceError as exc:
-        return json_response({"error": exc.message}, exc.status_code)
-    body = await request.json()
-    report = run_gap_report(str(body.get("as_of_date", "2026-11-16")))
+        return json_response(
+            {"ok": False, "error": exc.message, **exc.payload}, exc.status_code
+        )
     return json_response({"ok": True, "report": report})
